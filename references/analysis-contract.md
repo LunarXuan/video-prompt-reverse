@@ -9,6 +9,7 @@ Use this contract for the internal analysis record. The record is evidence for p
 - Separate subject motion, camera motion, and editing transitions.
 - Track invariants across shots: subject archetype, silhouette, wardrobe palette, props, screen direction, relative positions, light direction, palette, and material response.
 - For method-only transformation, abstract specific people, brands, logos, dialogue, and story facts while retaining their functional role.
+- Never conclude "the camera did not move" or "the shot is static" from adjacent frames alone. Sub-pixel continuous motion is invisible frame to frame and only appears when accumulated, so measure it with `scripts/analyze_motion.py` before describing any shot as still.
 - Copy dialogue only when the user explicitly requests transcription and the content is appropriate to reproduce. Otherwise record `speech_function`, cadence, emotion, and approximate duration.
 
 ## Required JSON shape
@@ -104,8 +105,13 @@ Use this contract for the internal analysis record. The record is evidence for p
     "positive": "A complete English positive prompt semantically aligned with the compiled Chinese positive prompt.",
     "negative": "A complete English negative prompt semantically aligned with all grouped Chinese negative constraints."
   },
+  "motion_analysis": {},
+  "action_mechanics": {},
   "uncertainties": []
 }
+```
+
+`motion_analysis` and `action_mechanics` are optional (see below); leave them out only when motion analysis was impossible, and record that omission in `uncertainties`.
 ```
 
 ## Shot table columns
@@ -121,6 +127,52 @@ If a field is not observable, write `无法从视频可靠判断` rather than fi
 Select 4-12 items by default. Cover opening and ending states plus the action, expression, camera, or transition changes that materially support the reverse-engineered prompt. Include at least one item per shot when practical. For long or highly cut videos, a timestamped contact sheet may count as one display item when showing every image individually would overwhelm the response.
 
 Compilation copies selected images into `evidence_frames/`, writes `evidence_gallery.md` and `visual_evidence.json`, and records each image hash in the reproducibility manifest. In the final response, display every curated item inline with an absolute path from the compiled output directory. Put the gallery immediately before the Chinese and English prompt blocks. Do not display generated substitutes or omit a curated image after claiming it as evidence.
+
+## Motion analysis and action mechanics
+
+Static frames cannot establish motion. Run `scripts/analyze_motion.py` after probing and before writing the spec. It emits two layers:
+
+- **`motion_analysis`** — observations only: multi-interval frame differences, dense optical flow, grid hotspots, ROI displacement series, silhouette tracking, rigid-fit inlier ratio, and the reciprocity ratio `R = |net displacement| / accumulated path length`.
+- **`action_mechanics`** — candidate body mechanisms that could have produced those observations, each with supporting and opposing evidence and a confidence score.
+
+Rules that follow from this split:
+
+- Frame difference and optical flow are **observations**. Never copy them into a prompt as an action ("local motion 4.2 px/frame" is not an action).
+- Always separate **net drift** from **accumulated path**. `R <= 0.25` means reciprocating motion (oscillation), `R >= 0.65` means unidirectional travel, and values between are mixed. A low `R` forbids describing the shot as a pan, tilt, or dolly.
+- Judge whole-body motion on **absolute** signals (silhouette position, area, limb width). In a selfie the body carries the camera, so residual flow with the global motion removed also removes a genuine body bounce.
+- Infer the **mechanism**: which region drives the movement, which joints follow, whether the cycle repeats, and what force produces it. Example of a well-formed conclusion: "the body keeps a gentle cyclic vertical bounce driven by the hips, with the knees softly absorbing it", not "the hip region moves 1.05 px/frame".
+- Every hypothesis carries `support`, `against`, and `confidence`. Monocular depth ambiguity, occlusion, and low texture must lower confidence and be recorded as limitations.
+- `status` is `auto_hypothesis` until a human runs `--confirm-hypothesis`. **Unconfirmed hypotheses must not be written into prompts as fact.** Compilation only injects mechanism clauses when `status` is `analyst_confirmed`.
+
+Both objects are optional so existing specs keep compiling. When present, `scripts/validate_spec.py` checks their structure, and `scripts/compile_prompt.py` emits `action_mechanics.md` plus a hash in the reproducibility manifest.
+
+```json
+{
+  "motion_analysis": {
+    "version": "1.0",
+    "sampling": {"analysis_fps": 30.0, "frame_count": 166, "size": [320, 568]},
+    "frame_difference": {"1": 5.32, "5": 16.18, "15": 14.56, "30": 19.21},
+    "global": {"flow_mean_px_per_frame": 1.10, "reciprocity": 0.14, "character": "reciprocating"},
+    "rois": [{"id": "head", "local_mean_px_per_frame": 1.75, "cycle": {"cyclic": false}}],
+    "silhouette": {"head_top_range_px": 33, "head_top_trend_px_per_s": 0.04,
+                   "cycle": {"head_top": {"cyclic": true, "hz": 2.17, "amplitude_px": 15.6}}},
+    "rigid_fit": {"inlier_ratio": 0.13},
+    "limitations": ["monocular depth ambiguity caps front-back claims"]
+  },
+  "action_mechanics": {
+    "status": "analyst_confirmed",
+    "primary_id": "h_vertical_bounce",
+    "hypotheses": [
+      {"id": "h_vertical_bounce", "verdict": "supported", "confidence": 0.85,
+       "chain": [{"region": "hip", "role": "driver", "joint_action": "ant_post_push_pull"},
+                 {"region": "knee", "role": "follower", "joint_action": "flex_extend"}],
+       "support": ["head-top row oscillates at 2.17 Hz"], "against": ["hip drive stays indirect"],
+       "prompt_hint_zh": "身体随胯部前后推拉做持续、轻微的上下起伏",
+       "prompt_hint_en": "the body keeps a gentle continuous vertical bounce driven by the hips"}
+    ]
+  }
+}
+```
 
 ## Bilingual final-prompt package
 

@@ -13,7 +13,7 @@ from pathlib import Path
 from validate_spec import validate
 
 
-TARGETS = ("generic", "veo", "sora", "kling", "wan")
+TARGETS = ("generic", "veo", "sora", "kling", "wan", "seedance")
 
 
 def sha256_text(value: str) -> str:
@@ -79,6 +79,47 @@ def shot_sentence(shot: dict) -> str:
     return f"[{shot.get('id')}｜{time_range}] {visual}。{progression}。"
 
 
+def mechanics_clauses(data: dict) -> tuple[list[str], list[str]]:
+    """Prompt clauses for confirmed body mechanisms, paired in both languages.
+
+    Unconfirmed hypotheses stay out of the prompts: an observation is not an
+    action until a human accepts the mechanism behind it.
+    """
+    mechanics = data.get("action_mechanics")
+    if not isinstance(mechanics, dict) or mechanics.get("status") != "analyst_confirmed":
+        return [], []
+    chinese, english = [], []
+    for item in mechanics.get("hypotheses", []):
+        if not isinstance(item, dict) or item.get("verdict") != "supported":
+            continue
+        if item.get("prompt_hint_zh"):
+            chinese.append(str(item["prompt_hint_zh"]).strip())
+        if item.get("prompt_hint_en"):
+            english.append(str(item["prompt_hint_en"]).strip())
+    return chinese, english
+
+
+def action_mechanics_markdown(data: dict) -> str:
+    mechanics = data.get("action_mechanics")
+    if not isinstance(mechanics, dict):
+        return "# Action mechanics\n\nNot provided. Run scripts/analyze_motion.py before describing motion.\n"
+    verdicts = {"supported": "支持", "refuted": "证伪", "inconclusive": "证据不足"}
+    lines = ["# Action mechanics", "",
+             f"status: `{mechanics.get('status')}`；primary: `{mechanics.get('primary_id')}`", "",
+             "| 假设 | 结论 | 置信度 | 发力链 | 支持证据 | 反对证据 |",
+             "| --- | --- | --- | --- | --- | --- |"]
+    for item in mechanics.get("hypotheses", []):
+        chain = " → ".join(
+            f"{link.get('region')}({link.get('role')}/{link.get('joint_action')})"
+            for link in item.get("chain", []) if isinstance(link, dict))
+        lines.append("| {} | {} | {:.2f} | {} | {} | {} |".format(
+            item.get("id", ""), verdicts.get(item.get("verdict"), item.get("verdict")),
+            float(item.get("confidence", 0)), chain or "-",
+            "；".join(item.get("support", [])) or "-", "；".join(item.get("against", [])) or "-"))
+    lines += ["", "只有 `status: analyst_confirmed` 且 `verdict: supported` 的假设才会写入提示词。", ""]
+    return "\n".join(lines)
+
+
 def compile_chinese_positive(data: dict) -> str:
     source = data["source"]
     global_data = data["global"]
@@ -100,19 +141,25 @@ def compile_chinese_positive(data: dict) -> str:
         f"视觉风格：{global_data.get('visual_style', '')}",
     ])
     shots = "\n".join(shot_sentence(shot) for shot in data["shots"])
+    mechanics_zh, _ = mechanics_clauses(data)
+    mechanics = f"动作机理：{compact(mechanics_zh, '；')}。" if mechanics_zh else ""
     rhythm = compact([
         f"叙事逻辑：{global_data.get('narrative_logic', '')}",
         f"节奏逻辑：{global_data.get('pacing_logic', '')}",
         f"全程保持：{compact(global_data.get('continuity_invariants', []), '、')}",
     ])
-    return f"{header}\n{anchors}。\n{shots}\n{rhythm}。".strip() + "\n"
+    blocks = [header, f"{anchors}。", shots]
+    if mechanics:
+        blocks.append(mechanics)
+    blocks.append(f"{rhythm}。")
+    return "\n".join(blocks).strip() + "\n"
 
 
 def language_prompt(sections: list[tuple[str, str]]) -> str:
     return "\n\n".join(f"{heading}\n\n{text.strip()}" for heading, text in sections) + "\n"
 
 
-def native_prompt(data: dict, target: str, english: str) -> tuple[str, str | None]:
+def native_prompt(data: dict, target: str, english: str, chinese: str | None = None) -> tuple[str, str | None]:
     supplied = data.get("target_prompts", {}).get(target, {})
     if isinstance(supplied, str) and supplied.strip():
         return supplied.strip() + "\n", None
@@ -124,8 +171,11 @@ def native_prompt(data: dict, target: str, english: str) -> tuple[str, str | Non
         "sora": "Sora chronological cinematic prompt；保留动作、镜头、光线、材质和声音的时间关系。\n",
         "kling": "Kling 多镜头生成提示词；各镜头明确时长、景别、视角、动作和运镜。\n",
         "wan": "Wan 动态优先提示词；突出动作顺序、运动方向、表情变化和摄影机运动。\n",
+        "seedance": "Seedance 中文视频提示词（中文优先，按 主体/动作 → 场景/光线 → 运镜 → 风格/画质 组织）：\n",
     }
     warning = None
+    if target == "seedance" and chinese:
+        return prefixes["seedance"] + chinese, warning
     return prefixes[target] + english, warning
 
 
@@ -209,7 +259,11 @@ def main() -> int:
     profile = profiles[args.target]
     chinese_positive = compile_chinese_positive(data)
     chinese_negative = negative_text(data["negative_constraints"]).strip() + "\n"
-    english_positive = data["english_prompt"]["positive"].strip() + "\n"
+    _, mechanics_en = mechanics_clauses(data)
+    english_positive = data["english_prompt"]["positive"].strip()
+    if mechanics_en:
+        english_positive += "\n\nBody mechanics: " + "; ".join(mechanics_en) + "."
+    english_positive += "\n"
     english_negative = data["english_prompt"]["negative"].strip() + "\n"
     chinese_bundle = language_prompt([
         ("中文正面提示词", chinese_positive),
@@ -219,13 +273,17 @@ def main() -> int:
         ("English Positive Prompt", english_positive),
         ("English Negative Prompt", english_negative),
     ])
-    native, native_warning = native_prompt(data, args.target, english_positive)
+    native, native_warning = native_prompt(data, args.target, english_positive, chinese_positive)
 
     (output_dir / "prompt_zh.txt").write_text(chinese_bundle, encoding="utf-8")
     (output_dir / "prompt_en.txt").write_text(english_bundle, encoding="utf-8")
     (output_dir / "prompt_native.txt").write_text(native, encoding="utf-8")
     (output_dir / "negative_prompt.txt").write_text(chinese_negative, encoding="utf-8")
     (output_dir / "timeline.md").write_text(timeline_markdown(data), encoding="utf-8")
+    (output_dir / "action_mechanics.md").write_text(action_mechanics_markdown(data), encoding="utf-8")
+    if isinstance(data.get("motion_analysis"), dict):
+        (output_dir / "motion_analysis.json").write_text(
+            json.dumps(data["motion_analysis"], ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
     shutil.copy2(args.spec, output_dir / "generation_spec.json")
 
     plan = {
@@ -240,9 +298,14 @@ def main() -> int:
     (output_dir / "generation_plan.json").write_text(json.dumps(plan, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
 
     manifest = {
-        "manifest_version": "1.0",
+        "manifest_version": "1.1",
         "source_sha256": data["source"]["sha256"],
         "spec_sha256": hashlib.sha256(args.spec.read_bytes()).hexdigest(),
+        "motion_analysis_sha256": (sha256_text(json.dumps(data["motion_analysis"], ensure_ascii=False, indent=2) + "\n")
+                                   if isinstance(data.get("motion_analysis"), dict) else None),
+        "action_mechanics_sha256": (sha256_text(action_mechanics_markdown(data))
+                                    if isinstance(data.get("action_mechanics"), dict) else None),
+        "action_mechanics_status": (data.get("action_mechanics", {}) or {}).get("status"),
         "prompt_zh_bundle_sha256": sha256_text(chinese_bundle),
         "prompt_en_bundle_sha256": sha256_text(english_bundle),
         "prompt_zh_positive_sha256": sha256_text(chinese_positive),

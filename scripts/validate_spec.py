@@ -129,6 +129,89 @@ def validate(data: object) -> list[str]:
             value = english_prompt.get(field)
             if not isinstance(value, str) or not value.strip():
                 errors.append(f"english_prompt.{field} must be a non-empty string")
+    # Optional motion layers. Absent means "motion analysis was not run"; present
+    # means the structure must hold, because prompts are generated from it.
+    motion = data.get("motion_analysis")
+    if motion is not None:
+        if not isinstance(motion, dict):
+            errors.append("motion_analysis must be an object")
+        else:
+            for field in ("version", "sampling", "global", "rois", "limitations"):
+                if field not in motion:
+                    errors.append(f"missing motion_analysis field: {field}")
+            global_motion = motion.get("global")
+            if isinstance(global_motion, dict):
+                ratio = global_motion.get("reciprocity")
+                if ratio is not None and (not isinstance(ratio, (int, float)) or not 0 <= ratio <= 1):
+                    errors.append("motion_analysis.global.reciprocity must be within [0, 1]")
+            rois = motion.get("rois")
+            if isinstance(rois, list):
+                seen_roi_ids: set[str] = set()
+                for index, roi in enumerate(rois):
+                    prefix = f"motion_analysis.rois[{index}]"
+                    if not isinstance(roi, dict):
+                        errors.append(f"{prefix} must be an object")
+                        continue
+                    roi_id = roi.get("id")
+                    if not isinstance(roi_id, str) or not roi_id:
+                        errors.append(f"{prefix}.id must be a non-empty string")
+                    elif roi_id in seen_roi_ids:
+                        errors.append(f"{prefix}.id is duplicated: {roi_id}")
+                    else:
+                        seen_roi_ids.add(roi_id)
+            elif rois is not None:
+                errors.append("motion_analysis.rois must be an array")
+            limitations = motion.get("limitations")
+            if limitations is not None and not isinstance(limitations, list):
+                errors.append("motion_analysis.limitations must be an array")
+
+    mechanics = data.get("action_mechanics")
+    if mechanics is not None:
+        if not isinstance(mechanics, dict):
+            errors.append("action_mechanics must be an object")
+        else:
+            seen_ids: set[str] = set()
+            status = mechanics.get("status")
+            if status not in ("auto_hypothesis", "analyst_confirmed"):
+                errors.append("action_mechanics.status must be auto_hypothesis or analyst_confirmed")
+            hypotheses = mechanics.get("hypotheses")
+            if not isinstance(hypotheses, list):
+                errors.append("action_mechanics.hypotheses must be an array")
+            else:
+                for index, item in enumerate(hypotheses):
+                    prefix = f"action_mechanics.hypotheses[{index}]"
+                    if not isinstance(item, dict):
+                        errors.append(f"{prefix} must be an object")
+                        continue
+                    identifier = item.get("id")
+                    if not isinstance(identifier, str) or not identifier:
+                        errors.append(f"{prefix}.id must be a non-empty string")
+                    elif identifier in seen_ids:
+                        errors.append(f"{prefix}.id is duplicated: {identifier}")
+                    else:
+                        seen_ids.add(identifier)
+                    if item.get("verdict") not in ("supported", "refuted", "inconclusive"):
+                        errors.append(f"{prefix}.verdict must be supported, refuted or inconclusive")
+                    confidence = item.get("confidence")
+                    if not isinstance(confidence, (int, float)) or not 0 <= confidence <= 1:
+                        errors.append(f"{prefix}.confidence must be within [0, 1]")
+                    chain = item.get("chain")
+                    if not isinstance(chain, list):
+                        errors.append(f"{prefix}.chain must be an array")
+                    else:
+                        for link_index, link in enumerate(chain):
+                            if not isinstance(link, dict) or not link.get("region"):
+                                errors.append(f"{prefix}.chain[{link_index}] must name a region")
+                    if not isinstance(item.get("support"), list) or not isinstance(item.get("against"), list):
+                        errors.append(f"{prefix}.support and .against must be arrays")
+                    # Anything written into a prompt needs a paired clause in both languages.
+                    if item.get("verdict") == "supported":
+                        if not item.get("prompt_hint_zh") or not item.get("prompt_hint_en"):
+                            errors.append(f"{prefix} supported hypothesis needs prompt_hint_zh and prompt_hint_en")
+            primary = mechanics.get("primary_id")
+            if primary is not None and primary not in seen_ids:
+                errors.append("action_mechanics.primary_id must reference an existing hypothesis")
+
     if not isinstance(data.get("uncertainties"), list):
         errors.append("uncertainties must be an array")
     return errors

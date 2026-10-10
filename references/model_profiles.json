@@ -27,5 +27,12 @@
     "prompt_style": "dynamic action and camera-first prose",
     "max_native_words": 100,
     "warning": "Record the exact Wan task, checkpoint, resolution, frame count, sampler, steps, guidance, seed and prompt-extension mode."
+  },
+  "seedance": {
+    "native_language": "zh",
+    "prompt_style": "Chinese-first natural-language prose with explicit camera direction",
+    "default_seconds": 6,
+    "default_resolution": "1280x720",
+    "warning": "Verify the active Seedance model version, duration, resolution, aspect ratio and i2v reference-image support before execution."
   }
 }

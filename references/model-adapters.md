@@ -44,6 +44,15 @@ These profiles are compilation guidance, not permanent API truth. Before emittin
 - Official prompt-extension guidance: https://github.com/Wan-Video/Wan2.2/blob/main/wan/utils/system_prompt.py
 - Official inference parameters: https://github.com/Wan-Video/Wan2.2/blob/main/generate.py
 
+## Seedance
+
+- 以中文自然语言为主，按“主体/动作 → 场景/光线 → 运镜 → 风格/画质”组织；运镜用自然语言指令（如“固定机位微晃”“缓慢推进”“轻微摇移”），不要堆砌英文参数。
+- 明确主体动作顺序、运动方向与表情变化；Seedance 对连续运动幅度敏感，宜用“持续轻微上下起伏”“手持往复微晃”等带程度与循环的词，避免把单镜头自拍微晃误写成“镜头缓慢下移”或“取景渐宽”。
+- 单镜头自拍场景应写为“手持自拍式持续微晃，全片无完全静止的帧，整体净漂移小于 15px，取景范围基本不变”，而非一次性推移。
+- t2v 与 i2v 均需记录：模型版本、时长（常用 6s/10s）、分辨率（720p/1080p）、画幅比（16:9/9:16）、参考图（i2v）与 seed。
+- 记录关键执行参数与 warning 后再生成；生成前再次核对当前 Seedance 版本与 i2v 参考图支持情况。
+- 官方参考：https://www.volcengine.com/product/video-generation
+
 ## Shared negative constraints
 
 For every target, render the selected constraints in both Chinese and English and keep them semantically aligned. Place each negative prompt in the same language-specific block as its positive prompt; keep the Chinese and English blocks separate.

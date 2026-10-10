@@ -96,26 +96,56 @@ def main() -> int:
     if duration <= 0:
         parser.error("could not determine a positive duration")
 
-    regular = [min(index * args.interval, duration - 0.001) for index in range(math.ceil(duration / args.interval) + 1)]
+    # Sample only up to the last decodable frame. A container duration may extend
+    # past the final frame, and seeking beyond it yields no packet at all.
+    sampling_duration = duration
+    frame_rate = parse_rate(video_stream.get("avg_frame_rate") or video_stream.get("r_frame_rate"))
+    nb_frames = video_stream.get("nb_frames")
+    if frame_rate and str(nb_frames or "").isdigit() and int(nb_frames) > 0:
+        sampling_duration = min(sampling_duration, max(0.0, (int(nb_frames) - 1) / frame_rate))
+
+    regular = [min(index * args.interval, sampling_duration - 0.001) for index in range(math.ceil(sampling_duration / args.interval) + 1)]
     scene_filter = f"select=gt(scene\\,{args.scene_threshold}),showinfo"
     scene_run = run([
         ffmpeg, "-hide_banner", "-nostdin", "-i", str(video),
         "-filter:v", scene_filter, "-an", "-f", "null", "-",
     ], check=False)
     scene_times = [float(match.group(1)) for match in PTS_RE.finditer(scene_run.stderr)]
-    timestamps = bounded_timestamps([0.0, duration - 0.001, *regular, *scene_times], duration, args.max_frames)
+    timestamps = bounded_timestamps(
+        [0.0, sampling_duration - 0.001, *regular, *scene_times], sampling_duration, args.max_frames
+    )
 
     extracted = []
     for index, timestamp in enumerate(timestamps, start=1):
         frame_path = frames_dir / f"frame_{index:04d}_{timestamp:010.3f}s.jpg"
+        # -strict -2 keeps ffmpeg from rejecting full-range (non-standard) YUV
+        # when encoding evidence JPEGs.
         command = [
             ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
             "-ss", f"{timestamp:.3f}", "-i", str(video), "-frames:v", "1",
-            "-vf", "scale=1280:-2:force_original_aspect_ratio=decrease", "-q:v", "2", str(frame_path),
+            "-vf", "scale=1280:-2:force_original_aspect_ratio=decrease",
+            "-strict", "-2", "-q:v", "2", str(frame_path),
         ]
         result = run(command, check=False)
         if result.returncode != 0 or not frame_path.is_file():
-            raise RuntimeError(f"frame extraction failed at {timestamp:.3f}s: {result.stderr.strip()}")
+            # Retry one frame earlier: some containers report a duration that lands
+            # past the last decodable packet.
+            fallback = max(0.0, timestamp - (1.0 / frame_rate if frame_rate else 0.04))
+            fallback_path = frames_dir / f"frame_{index:04d}_{fallback:010.3f}s.jpg"
+            if fallback != timestamp:
+                retry = [
+                    ffmpeg, "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                    "-ss", f"{fallback:.3f}", "-i", str(video), "-frames:v", "1",
+                    "-vf", "scale=1280:-2:force_original_aspect_ratio=decrease",
+                    "-strict", "-2", "-q:v", "2", str(fallback_path),
+                ]
+                retry_result = run(retry, check=False)
+                if retry_result.returncode == 0 and fallback_path.is_file():
+                    timestamp, frame_path = fallback, fallback_path
+                else:
+                    raise RuntimeError(f"frame extraction failed at {timestamp:.3f}s: {result.stderr.strip()}")
+            else:
+                raise RuntimeError(f"frame extraction failed at {timestamp:.3f}s: {result.stderr.strip()}")
         extracted.append({"timestamp": timestamp, "path": str(frame_path), "sha256": sha256_file(frame_path)})
 
     audio_path = None
@@ -145,6 +175,7 @@ def main() -> int:
         "sampling": {
             "interval_seconds": args.interval,
             "scene_threshold": args.scene_threshold,
+            "sampling_duration_seconds": round(sampling_duration, 6),
             "scene_timestamps": sorted({round(value, 3) for value in scene_times}),
             "selected_timestamps": timestamps,
             "max_frames": args.max_frames,
